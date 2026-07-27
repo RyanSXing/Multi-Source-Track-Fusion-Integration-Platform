@@ -1,0 +1,50 @@
+{
+  "generatedAt": "2026-07-27T20:12:00.255Z",
+  "runId": "87413f6c74b5",
+  "config": {
+    "input": "tools/fixtures/detections.jsonl",
+    "multiplier": 20.0,
+    "cycles": 40,
+    "cycleMs": 1200,
+    "tickMs": 1000,
+    "topic": "detections"
+  },
+  "inputMessages": 240,
+  "latencySamples": 240,
+  "deliveryRatio": 1.0,
+  "receiverErrors": [],
+  "productionDurationMs": 2385.161,
+  "producerThroughputMessagesPerSecond": 100.622,
+  "latencyMs": {
+    "p50": 3001.974,
+    "p95": 3545.175,
+    "p99": 3663.175,
+    "max": 3663.238
+  },
+  "processCpuPercent": {
+    "average": 5.582,
+    "max": 33.677,
+    "samples": 20
+  },
+  "duplicateTrackRemoval": {
+    "groundTruthObjects": 3,
+    "sourceSpecificTracks": 6,
+    "fusedTracks": 3,
+    "reductionPercent": 50.0
+  },
+  "groundTruthIntegrity": {
+    "impureTracks": 0,
+    "missingGroundTruthObjects": 0,
+    "fragmentedGroundTruthObjects": 0
+  },
+  "acceptance": {
+    "passed": true,
+    "criteria": {
+      "minDeliveryRatio": 1,
+      "maxP99Ms": null,
+      "minDuplicateReductionPercent": null,
+      "allowFragmentation": false
+    },
+    "failures": []
+  }
+}

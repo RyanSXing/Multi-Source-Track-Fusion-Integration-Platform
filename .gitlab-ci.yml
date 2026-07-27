@@ -1,0 +1,72 @@
+stages:
+  - build
+  - test
+  - coverage-gate
+  - integration
+  - package
+
+variables:
+  MAVEN_OPTS: "-Dmaven.repo.local=.m2/repository"
+
+cache:
+  paths:
+    - .m2/repository/
+
+backend-build:
+  stage: build
+  image: maven:3.9.11-eclipse-temurin-21
+  script:
+    - ./mvnw -B -DskipTests compile
+
+console-build:
+  stage: build
+  image: node:24-alpine
+  script:
+    - cd tf-console
+    - npm ci
+    - npm run build
+
+test:
+  stage: test
+  image: maven:3.9.11-eclipse-temurin-21
+  script:
+    - ./mvnw -B -Dtest='!*IntegrationTest' test
+  artifacts:
+    when: always
+    reports:
+      junit:
+        - "tf-*/target/surefire-reports/TEST-*.xml"
+
+coverage-gate:
+  stage: coverage-gate
+  image: maven:3.9.11-eclipse-temurin-21
+  script:
+    - ./mvnw -B -pl tf-common,tf-fusion -am verify
+  artifacts:
+    paths:
+      - tf-common/target/site/jacoco/
+      - tf-fusion/target/site/jacoco/
+
+integration:
+  stage: integration
+  image: maven:3.9.11-eclipse-temurin-21
+  services:
+    - name: docker:27-dind
+      command: ["--tls=false"]
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_TLS_CERTDIR: ""
+  before_script:
+    - apt-get update
+    - apt-get install -y docker.io
+  script:
+    - ./mvnw -B -pl tf-service -am -Dtest='*IntegrationTest' -Dsurefire.failIfNoSpecifiedTests=false test
+
+package:
+  stage: package
+  image: maven:3.9.11-eclipse-temurin-21
+  script:
+    - ./mvnw -B -DskipTests package
+  artifacts:
+    paths:
+      - tf-service/target/tf-service-*.jar

@@ -1,0 +1,6 @@
+{"offsetMs":0,"sourceId":"load-adsb","sourceType":"ADSB","latDeg":43.55,"lonDeg":-79.55,"altMeters":1100.0,"speedMps":45.0,"headingDeg":90.0,"positionSigmaMeters":10.0,"groundTruth":"aircraft-alpha"}
+{"offsetMs":5,"sourceId":"load-radar","sourceType":"RADAR","latDeg":43.55003,"lonDeg":-79.54997,"altMeters":1095.0,"speedMps":45.0,"headingDeg":90.0,"positionSigmaMeters":50.0,"groundTruth":"aircraft-alpha"}
+{"offsetMs":30,"sourceId":"load-adsb","sourceType":"ADSB","latDeg":43.60,"lonDeg":-79.45,"altMeters":900.0,"speedMps":38.0,"headingDeg":180.0,"positionSigmaMeters":10.0,"groundTruth":"aircraft-bravo"}
+{"offsetMs":35,"sourceId":"load-radar","sourceType":"RADAR","latDeg":43.59997,"lonDeg":-79.45002,"altMeters":905.0,"speedMps":38.0,"headingDeg":180.0,"positionSigmaMeters":50.0,"groundTruth":"aircraft-bravo"}
+{"offsetMs":60,"sourceId":"load-adsb","sourceType":"ADSB","latDeg":43.72,"lonDeg":-79.20,"altMeters":1500.0,"speedMps":52.0,"headingDeg":270.0,"positionSigmaMeters":10.0,"groundTruth":"aircraft-charlie"}
+{"offsetMs":65,"sourceId":"load-radar","sourceType":"RADAR","latDeg":43.72002,"lonDeg":-79.20003,"altMeters":1490.0,"speedMps":52.0,"headingDeg":270.0,"positionSigmaMeters":50.0,"groundTruth":"aircraft-charlie"}
