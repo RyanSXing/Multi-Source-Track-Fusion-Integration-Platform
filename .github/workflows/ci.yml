@@ -1,0 +1,80 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  JAVA_VERSION: "21"
+  NODE_VERSION: "24"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: maven
+      - run: ./mvnw -B -DskipTests compile
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: tf-console/package-lock.json
+      - run: npm ci
+        working-directory: tf-console
+      - run: npm run build
+        working-directory: tf-console
+
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: maven
+      - run: ./mvnw -B -Dtest='!*IntegrationTest' test
+
+  coverage-gate:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: maven
+      - run: ./mvnw -B -pl tf-common,tf-fusion -am verify
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage-reports
+          path: "tf-*/target/site/jacoco/"
+
+  integration:
+    needs: coverage-gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: maven
+      - run: ./mvnw -B -pl tf-service -am -Dtest='*IntegrationTest' -Dsurefire.failIfNoSpecifiedTests=false test
+
+  package:
+    needs: integration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose build
