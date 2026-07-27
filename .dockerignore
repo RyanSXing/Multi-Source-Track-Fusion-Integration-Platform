@@ -1,0 +1,5 @@
+.git
+.m2
+**/node_modules
+**/target
+**/dist

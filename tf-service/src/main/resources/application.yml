@@ -1,0 +1,18 @@
+spring:
+  application:
+    name: track-fusion
+  lifecycle:
+    timeout-per-shutdown-phase: 10s
+
+server:
+  shutdown: graceful
+
+management:
+  endpoint:
+    health:
+      probes:
+        enabled: true
+  endpoints:
+    web:
+      exposure:
+        include: health,info

@@ -1,0 +1,64 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-trackfusion}
+      POSTGRES_USER: ${POSTGRES_USER:-trackfusion}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-trackfusion}
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v25.1.9
+    command:
+      - redpanda
+      - start
+      - --overprovisioned
+      - --smp=1
+      - --memory=512M
+      - --reserve-memory=0M
+      - --node-id=0
+      - --check=false
+      - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr=internal://redpanda:9092,external://localhost:19092
+    ports:
+      - "19092:19092"
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health --exit-when-healthy"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - redpanda-data:/var/lib/redpanda/data
+
+  service:
+    build:
+      context: .
+      dockerfile: tf-service/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+
+  console:
+    build:
+      context: tf-console
+    depends_on:
+      service:
+        condition: service_started
+    ports:
+      - "3000:80"
+
+volumes:
+  postgres-data:
+  redpanda-data:
