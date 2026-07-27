@@ -253,12 +253,32 @@ class FusionEngineTest {
                         () ->
                                 engine.update(
                                         START.plusSeconds(1),
-                                        List.of(
-                                                detection(
-                                                        "adsb-feed",
-                                                        "ADSB",
-                                                        START,
-                                                        0))));
+                                List.of(
+                                        detection(
+                                                "adsb-feed",
+                                                "ADSB",
+                                                START,
+                                                0))));
+    }
+
+    @Test
+    void acceptsBufferedObservationsOnALaterServiceTick() {
+        FusionEngine engine =
+                new FusionEngine(PLANE, new FusionConfig(1, 1, 3, 9.21, 1));
+
+        assertThat(
+                        engine.updateAt(
+                                START.plusSeconds(1),
+                                List.of(
+                                        detection("adsb-feed", "ADSB", START, 0),
+                                        detection("radar-east", "RADAR", START, 0))))
+                .singleElement()
+                .satisfies(
+                        track -> {
+                            assertThat(track.stateAt()).isEqualTo(START.plusSeconds(1));
+                            assertThat(track.lastObservedAt()).isEqualTo(START);
+                            assertThat(track.contributors()).hasSize(2);
+                        });
     }
 
     @Test

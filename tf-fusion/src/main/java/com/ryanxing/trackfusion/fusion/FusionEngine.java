@@ -49,6 +49,16 @@ public final class FusionEngine {
     }
 
     public synchronized List<TrackSnapshot> update(Instant at, List<Detection> detections) {
+        return update(at, detections, true);
+    }
+
+    public synchronized List<TrackSnapshot> updateAt(
+            Instant at, List<Detection> detections) {
+        return update(at, detections, false);
+    }
+
+    private List<TrackSnapshot> update(
+            Instant at, List<Detection> detections, boolean requireExactObservationTime) {
         Objects.requireNonNull(at, "at");
         Objects.requireNonNull(detections, "detections");
         if (lastTick != null && !at.isAfter(lastTick)) {
@@ -58,8 +68,14 @@ public final class FusionEngine {
                 .anyMatch(
                         detection ->
                                 detection == null
-                                        || !detection.observedAt().equals(at))) {
-            throw new IllegalArgumentException("all detections must match the fusion tick");
+                                        || requireExactObservationTime
+                                                && !detection.observedAt().equals(at)
+                                        || !requireExactObservationTime
+                                                && detection.observedAt().isAfter(at))) {
+            throw new IllegalArgumentException(
+                    requireExactObservationTime
+                            ? "all detections must match the fusion tick"
+                            : "detections cannot be newer than the fusion tick");
         }
         lastTick = at;
 

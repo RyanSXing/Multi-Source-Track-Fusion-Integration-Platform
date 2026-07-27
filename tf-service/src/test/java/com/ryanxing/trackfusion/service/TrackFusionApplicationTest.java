@@ -19,7 +19,10 @@ class TrackFusionApplicationTest {
         SpringApplication application = new SpringApplication(applicationClass);
         application.setDefaultProperties(
                 java.util.Map.of("spring.main.web-application-type", "none"));
-        try (ConfigurableApplicationContext context = application.run()) {
+        try (ConfigurableApplicationContext context =
+                application.run(
+                        "--track-fusion.pipeline.enabled=false",
+                        "--spring.sql.init.mode=never")) {
             assertThat(context.isActive()).isTrue();
         }
     }

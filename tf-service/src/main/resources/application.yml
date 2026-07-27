@@ -3,6 +3,32 @@ spring:
     name: track-fusion
   lifecycle:
     timeout-per-shutdown-phase: 10s
+  r2dbc:
+    url: ${SPRING_R2DBC_URL:r2dbc:postgresql://localhost:5432/trackfusion}
+    username: ${POSTGRES_USER:trackfusion}
+    password: ${POSTGRES_PASSWORD:trackfusion}
+  sql:
+    init:
+      mode: always
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:19092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      properties:
+        enable.idempotence: true
+    consumer:
+      group-id: track-fusion
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      properties:
+        spring.json.trusted.packages: com.ryanxing.trackfusion.common
+        spring.json.value.default.type: com.ryanxing.trackfusion.common.Detection
+        spring.json.use.type.headers: false
+    listener:
+      type: batch
+      ack-mode: batch
 
 server:
   shutdown: graceful
@@ -15,4 +41,37 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info
+        include: health,info,metrics,prometheus
+
+track-fusion:
+  pipeline:
+    enabled: ${TRACK_FUSION_PIPELINE_ENABLED:true}
+  kafka:
+    detections-topic: detections
+    consumer-id: track-fusion
+  origin:
+    latitude: ${FUSION_ORIGIN_LATITUDE:43.65}
+    longitude: ${FUSION_ORIGIN_LONGITUDE:-79.38}
+    altitude-meters: ${FUSION_ORIGIN_ALTITUDE_METERS:0}
+  sources:
+    fixture:
+      enabled: ${FIXTURE_SOURCES_ENABLED:true}
+    opensky:
+      enabled: ${OPENSKY_ENABLED:false}
+      endpoint: ${OPENSKY_ENDPOINT:https://opensky-network.org/api/states/all?lamin=42&lomin=-81&lamax=45&lomax=-77}
+      bearer-token: ${OPENSKY_BEARER_TOKEN:}
+      poll-interval: ${OPENSKY_POLL_INTERVAL:10s}
+    ais:
+      enabled: ${AISSTREAM_ENABLED:false}
+      endpoint: ${AISSTREAM_ENDPOINT:wss://stream.aisstream.io/v0/stream}
+      api-key: ${AISSTREAM_API_KEY:}
+      south: ${AISSTREAM_SOUTH:42}
+      west: ${AISSTREAM_WEST:-81}
+      north: ${AISSTREAM_NORTH:45}
+      east: ${AISSTREAM_EAST:-77}
+    radar:
+      enabled: ${RADAR_ENABLED:false}
+      source-id: ${RADAR_SOURCE_ID:radar-east}
+      port: ${RADAR_PORT:5005}
+    weather:
+      enabled: ${OPEN_METEO_ENABLED:false}
