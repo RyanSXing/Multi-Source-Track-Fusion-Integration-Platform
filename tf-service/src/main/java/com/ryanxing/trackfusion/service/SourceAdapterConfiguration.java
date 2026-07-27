@@ -17,6 +17,8 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
@@ -24,6 +26,8 @@ import org.springframework.context.annotation.Configuration;
 
 @Configuration
 public class SourceAdapterConfiguration {
+    private static final Logger LOG =
+            LoggerFactory.getLogger(SourceAdapterConfiguration.class);
 
     @Bean
     HttpClient sourceHttpClient() {
@@ -87,14 +91,15 @@ public class SourceAdapterConfiguration {
             @Value("${track-fusion.sources.opensky.endpoint}") URI endpoint,
             @Value("${track-fusion.sources.opensky.bearer-token:}") String token,
             @Value("${track-fusion.sources.opensky.poll-interval:10s}")
-                    Duration pollInterval) {
-        return new ResilientSourceAdapter(
+                    Duration pollInterval,
+            SourceHealthRegistry health) {
+        return resilient(
                 new OpenSkyAdapter(
                         "opensky", client, endpoint, 12, token),
-                CircuitBreaker.ofDefaults("opensky"),
                 pollInterval,
                 Duration.ofMinutes(5),
-                pollInterval);
+                pollInterval,
+                health);
     }
 
     @Bean
@@ -108,8 +113,9 @@ public class SourceAdapterConfiguration {
             @Value("${track-fusion.sources.ais.south:42}") double south,
             @Value("${track-fusion.sources.ais.west:-81}") double west,
             @Value("${track-fusion.sources.ais.north:45}") double north,
-            @Value("${track-fusion.sources.ais.east:-77}") double east) {
-        return new ResilientSourceAdapter(
+            @Value("${track-fusion.sources.ais.east:-77}") double east,
+            SourceHealthRegistry health) {
+        return resilient(
                 new AisStreamAdapter(
                         "aisstream",
                         client,
@@ -119,9 +125,10 @@ public class SourceAdapterConfiguration {
                                 new AisStreamAdapter.BoundingBox(
                                         south, west, north, east)),
                         25),
-                CircuitBreaker.ofDefaults("aisstream"),
                 Duration.ofSeconds(1),
-                Duration.ofMinutes(1));
+                Duration.ofMinutes(1),
+                null,
+                health);
     }
 
     @Bean
@@ -131,12 +138,14 @@ public class SourceAdapterConfiguration {
     SourceAdapter radar(
             @Value("${track-fusion.sources.radar.source-id:radar-east}")
                     String sourceId,
-            @Value("${track-fusion.sources.radar.port:5005}") int port) {
-        return new ResilientSourceAdapter(
+            @Value("${track-fusion.sources.radar.port:5005}") int port,
+            SourceHealthRegistry health) {
+        return resilient(
                 new RadarUdpAdapter(sourceId, port),
-                CircuitBreaker.ofDefaults(sourceId),
                 Duration.ofSeconds(1),
-                Duration.ofSeconds(30));
+                Duration.ofSeconds(30),
+                null,
+                health);
     }
 
     @Bean
@@ -145,6 +154,35 @@ public class SourceAdapterConfiguration {
             havingValue = "true")
     TrackEnricher weather(HttpClient client) {
         return new OpenMeteoEnricher(client, Duration.ofMinutes(10), 0.1);
+    }
+
+    private static SourceAdapter resilient(
+            SourceAdapter delegate,
+            Duration minimumBackoff,
+            Duration maximumBackoff,
+            Duration repeatDelay,
+            SourceHealthRegistry health) {
+        CircuitBreaker breaker = CircuitBreaker.ofDefaults(delegate.sourceId());
+        breaker.getEventPublisher()
+                .onStateTransition(
+                        event -> {
+                            health.circuitTransition(
+                                    delegate.sourceId(), delegate.sourceType());
+                            LOG.warn(
+                                    "Source {} circuit transitioned to {}",
+                                    delegate.sourceId(),
+                                    event.getStateTransition().getToState());
+                        });
+        return new ResilientSourceAdapter(
+                delegate,
+                breaker,
+                minimumBackoff,
+                maximumBackoff,
+                repeatDelay,
+                error -> {
+                    health.error(delegate.sourceId(), delegate.sourceType(), "adapter");
+                    LOG.warn("Source {} retrying", delegate.sourceId(), error);
+                });
     }
 
     private static Detection detection(

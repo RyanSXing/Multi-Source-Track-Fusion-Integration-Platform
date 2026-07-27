@@ -10,10 +10,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
-import org.springframework.context.event.EventListener;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Component;
-import org.springframework.boot.context.event.ApplicationReadyEvent;
 import reactor.core.Disposable;
 import reactor.core.Disposables;
 import reactor.core.publisher.Mono;
@@ -33,7 +31,8 @@ public final class AdapterKafkaPublisher {
     private final KafkaTemplate<String, Detection> kafka;
     private final SourceHealthRegistry health;
     private final String topic;
-    private final Disposable.Composite subscriptions = Disposables.composite();
+    private Disposable.Composite subscriptions = Disposables.composite();
+    private boolean active;
 
     public AdapterKafkaPublisher(
             List<SourceAdapter> adapters,
@@ -48,8 +47,16 @@ public final class AdapterKafkaPublisher {
         this.topic = topic;
     }
 
-    @EventListener(ApplicationReadyEvent.class)
-    public void start() {
+    synchronized void setActive(boolean shouldBeActive) {
+        if (active == shouldBeActive) {
+            return;
+        }
+        active = shouldBeActive;
+        if (!active) {
+            subscriptions.dispose();
+            subscriptions = Disposables.composite();
+            return;
+        }
         adapters.forEach(
                 adapter ->
                         subscriptions.add(
@@ -60,7 +67,8 @@ public final class AdapterKafkaPublisher {
                                                 error -> {
                                                     health.error(
                                                             adapter.sourceId(),
-                                                            adapter.sourceType());
+                                                            adapter.sourceType(),
+                                                            "adapter");
                                                     LOG.error(
                                                             "Source {} failed",
                                                             adapter.sourceId(),
@@ -68,18 +76,26 @@ public final class AdapterKafkaPublisher {
                                                 })));
     }
 
-    private Mono<Void> publish(Detection detection) {
+    Mono<Void> publish(Detection detection) {
+        health.adapterReceived(detection);
         Mono<Detection> enriched = Mono.just(detection);
         for (TrackEnricher enricher : enrichers) {
             enriched =
                     enriched.flatMap(
                             current ->
                                     enricher.enrich(current)
+                                            .doOnSuccess(
+                                                    ignored ->
+                                                            health.recovered(
+                                                                    enricher.sourceType(),
+                                                                    enricher.sourceType(),
+                                                                    "enrichment"))
                                             .onErrorResume(
                                                     error -> {
                                                         health.error(
                                                                 enricher.sourceType(),
-                                                                enricher.sourceType());
+                                                                enricher.sourceType(),
+                                                                "enrichment");
                                                         LOG.warn(
                                                                 "{} enrichment failed",
                                                                 enricher.sourceType(),
@@ -88,23 +104,37 @@ public final class AdapterKafkaPublisher {
                                                     }));
         }
         return enriched.flatMap(
-                        current ->
-                                Mono.fromFuture(
-                                                kafka.send(
-                                                        topic,
-                                                        current.sourceType()
-                                                                + ':'
-                                                                + current.sourceId(),
-                                                        current))
-                                        .then())
-                .retryWhen(
-                        Retry.backoff(Long.MAX_VALUE, Duration.ofSeconds(1))
-                                .maxBackoff(Duration.ofSeconds(30))
-                                .transientErrors(true));
+                current ->
+                        Mono.defer(
+                                        () ->
+                                                Mono.fromFuture(
+                                                        kafka.send(
+                                                                topic,
+                                                                current.sourceType()
+                                                                        + ':'
+                                                                        + current.sourceId(),
+                                                                current)))
+                                .doOnSuccess(ignored -> health.published(current))
+                                .retryWhen(
+                                        Retry.backoff(Long.MAX_VALUE, Duration.ofSeconds(1))
+                                                .maxBackoff(Duration.ofSeconds(30))
+                                                .transientErrors(true)
+                                                .doBeforeRetry(
+                                                        retry -> {
+                                                            health.error(
+                                                                    current.sourceId(),
+                                                                    current.sourceType(),
+                                                                    "publish");
+                                                            LOG.warn(
+                                                                    "Kafka publish failed for {}",
+                                                                    current.sourceId(),
+                                                                    retry.failure());
+                                                        }))
+                                .then());
     }
 
     @PreDestroy
-    public void stop() {
-        subscriptions.dispose();
+    public synchronized void stop() {
+        setActive(false);
     }
 }

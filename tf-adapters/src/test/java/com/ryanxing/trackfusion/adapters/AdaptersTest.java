@@ -161,6 +161,7 @@ class AdaptersTest {
                 }
                 """;
         AtomicInteger attempts = new AtomicInteger();
+        AtomicInteger observedRetries = new AtomicInteger();
         CircuitBreaker breaker = CircuitBreaker.ofDefaults("aisstream");
         SourceAdapter adapter =
                 new ResilientSourceAdapter(
@@ -174,7 +175,9 @@ class AdaptersTest {
                                 25),
                         breaker,
                         Duration.ofMillis(1),
-                        Duration.ofMillis(2));
+                        Duration.ofMillis(2),
+                        null,
+                        ignored -> observedRetries.incrementAndGet());
 
         StepVerifier.create(adapter.stream())
                 .assertNext(
@@ -187,6 +190,7 @@ class AdaptersTest {
                         })
                 .verifyComplete();
         assertThat(attempts).hasValue(2);
+        assertThat(observedRetries).hasValue(1);
         assertThat(breaker.getMetrics())
                 .satisfies(
                         metrics -> {

@@ -5,6 +5,7 @@ import io.github.resilience4j.circuitbreaker.CircuitBreaker;
 import io.github.resilience4j.reactor.circuitbreaker.operator.CircuitBreakerOperator;
 import java.time.Duration;
 import java.util.Objects;
+import java.util.function.Consumer;
 import reactor.core.publisher.Flux;
 import reactor.util.retry.Retry;
 
@@ -14,9 +15,10 @@ public final class ResilientSourceAdapter implements SourceAdapter {
     private final Duration minimumBackoff;
     private final Duration maximumBackoff;
     private final Duration repeatDelay;
+    private final Consumer<Throwable> retryObserver;
 
     public ResilientSourceAdapter(SourceAdapter delegate, CircuitBreaker circuitBreaker) {
-        this(delegate, circuitBreaker, null, null, null);
+        this(delegate, circuitBreaker, null, null, null, ignored -> {});
     }
 
     public ResilientSourceAdapter(
@@ -33,6 +35,22 @@ public final class ResilientSourceAdapter implements SourceAdapter {
             Duration minimumBackoff,
             Duration maximumBackoff,
             Duration repeatDelay) {
+        this(
+                delegate,
+                circuitBreaker,
+                minimumBackoff,
+                maximumBackoff,
+                repeatDelay,
+                ignored -> {});
+    }
+
+    public ResilientSourceAdapter(
+            SourceAdapter delegate,
+            CircuitBreaker circuitBreaker,
+            Duration minimumBackoff,
+            Duration maximumBackoff,
+            Duration repeatDelay,
+            Consumer<Throwable> retryObserver) {
         this.delegate = Objects.requireNonNull(delegate, "delegate");
         this.circuitBreaker = Objects.requireNonNull(circuitBreaker, "circuitBreaker");
         if (minimumBackoff != null
@@ -51,6 +69,7 @@ public final class ResilientSourceAdapter implements SourceAdapter {
         this.minimumBackoff = minimumBackoff;
         this.maximumBackoff = maximumBackoff;
         this.repeatDelay = repeatDelay;
+        this.retryObserver = Objects.requireNonNull(retryObserver, "retryObserver");
     }
 
     @Override
@@ -76,7 +95,9 @@ public final class ResilientSourceAdapter implements SourceAdapter {
                     stream.retryWhen(
                             Retry.backoff(Long.MAX_VALUE, minimumBackoff)
                                     .maxBackoff(maximumBackoff)
-                                    .transientErrors(true));
+                                    .transientErrors(true)
+                                    .doBeforeRetry(
+                                            retry -> retryObserver.accept(retry.failure())));
         }
         return repeatDelay == null
                 ? stream

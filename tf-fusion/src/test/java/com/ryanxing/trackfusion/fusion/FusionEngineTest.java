@@ -7,6 +7,7 @@ import com.ryanxing.trackfusion.common.Detection;
 import com.ryanxing.trackfusion.common.EnuPoint;
 import com.ryanxing.trackfusion.common.GeodeticPoint;
 import com.ryanxing.trackfusion.common.LocalTangentPlane;
+import com.ryanxing.trackfusion.common.RadarPacket;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -16,6 +17,16 @@ import org.junit.jupiter.api.Test;
 class FusionEngineTest {
     private static final LocalTangentPlane PLANE = new LocalTangentPlane(0, 0, 0);
     private static final Instant START = Instant.parse("2026-01-02T03:04:05Z");
+
+    @Test
+    void startsTrackIdsAfterPersistedHistory() {
+        FusionEngine engine = new FusionEngine(PLANE, FusionConfig.defaults(), 42);
+
+        assertThat(engine.update(START, List.of(detection("radar", "RADAR", START, 0))))
+                .singleElement()
+                .extracting(TrackSnapshot::trackId)
+                .isEqualTo(42L);
+    }
 
     @Test
     void weightsMeasurementsByTheirReportedUncertainty() {
@@ -178,6 +189,55 @@ class FusionEngineTest {
     }
 
     @Test
+    void coalescesRepeatedObjectUpdatesFromOneSourceWithinATick() {
+        FusionEngine engine =
+                new FusionEngine(PLANE, new FusionConfig(1, 1, 3, 9.21, 1));
+        Instant tick = START.plusSeconds(1);
+
+        List<TrackSnapshot> tracks =
+                engine.updateAt(
+                        tick,
+                        List.of(
+                                detection(
+                                        "adsb-feed",
+                                        "ADSB",
+                                        START.plusMillis(100),
+                                        0,
+                                        10.0,
+                                        90.0,
+                                        5,
+                                        Map.of("icao24", "abc123")),
+                                detection(
+                                        "adsb-feed",
+                                        "ADSB",
+                                        START.plusMillis(800),
+                                        4,
+                                        10.0,
+                                        90.0,
+                                        5,
+                                        Map.of("icao24", "abc123")),
+                                radar(START.plusMillis(200), 0),
+                                radar(START.plusMillis(700), 4)));
+
+        assertThat(tracks)
+                .singleElement()
+                .satisfies(
+                        track -> {
+                            assertThat(track.contributors()).hasSize(2);
+                            assertThat(track.contributors())
+                                    .filteredOn(detection -> detection.sourceType().equals("ADSB"))
+                                    .singleElement()
+                                    .extracting(Detection::observedAt)
+                                    .isEqualTo(START.plusMillis(800));
+                            assertThat(track.contributors())
+                                    .filteredOn(detection -> detection.sourceType().equals("RADAR"))
+                                    .singleElement()
+                                    .extracting(Detection::observedAt)
+                                    .isEqualTo(START.plusMillis(700));
+                        });
+    }
+
+    @Test
     void replayOrdersComparatorTiesByEveryStateAffectingField() {
         Detection precise =
                 detection(
@@ -330,5 +390,20 @@ class FusionEngineTest {
                 headingDeg,
                 sigmaMeters,
                 attributes);
+    }
+
+    private static Detection radar(Instant observedAt, double eastMeters) {
+        GeodeticPoint point = PLANE.toGeodetic(new EnuPoint(eastMeters, 0, 0));
+        return new RadarPacket(
+                        "radar-feed",
+                        "abc123",
+                        observedAt,
+                        point.latDeg(),
+                        point.lonDeg(),
+                        point.altMeters(),
+                        10,
+                        90,
+                        25)
+                .toDetection(observedAt.plusMillis(20));
     }
 }

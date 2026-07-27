@@ -9,6 +9,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.LongAdder;
 
@@ -22,22 +23,62 @@ public final class SourceHealthRegistry {
         this.meters = meters;
     }
 
-    public void message(Detection detection) {
+    public void adapterReceived(Detection detection) {
+        State state = state(detection.sourceId(), detection.sourceType());
+        state.adapterReceived.increment();
+        state.failedStages.remove("adapter");
+        state.adapterReceivedMetric.increment();
+    }
+
+    public void published(Detection detection) {
+        State state = state(detection.sourceId(), detection.sourceType());
+        state.kafkaPublished.increment();
+        state.failedStages.remove("publish");
+        state.kafkaPublishedMetric.increment();
+    }
+
+    public void consumed(Detection detection) {
         State state = state(detection.sourceId(), detection.sourceType());
         Instant now = clock.instant();
-        state.messages.increment();
+        state.kafkaConsumed.increment();
         state.lastMessageAt = now;
-        state.ingest.increment();
+        state.kafkaConsumedMetric.increment();
         Duration delay = Duration.between(detection.receivedAt(), now);
         if (!delay.isNegative()) {
             state.latency.record(delay);
         }
     }
 
-    public void error(String sourceId, String sourceType) {
+    public void redelivered(Detection detection) {
+        State state = state(detection.sourceId(), detection.sourceType());
+        state.redelivered.increment();
+        state.redeliveredMetric.increment();
+    }
+
+    public void late(Detection detection) {
+        State state = state(detection.sourceId(), detection.sourceType());
+        state.late.increment();
+        state.lateMetric.increment();
+    }
+
+    public void error(String sourceId, String sourceType, String stage) {
         State state = state(sourceId, sourceType);
         state.errors.increment();
+        state.failedStages.add(stage);
         state.failures.increment();
+    }
+
+    public void recovered(String sourceId, String sourceType, String stage) {
+        State state = sources.get(sourceType + '\0' + sourceId);
+        if (state != null) {
+            state.failedStages.remove(stage);
+        }
+    }
+
+    public void circuitTransition(String sourceId, String sourceType) {
+        State state = state(sourceId, sourceType);
+        state.circuitTransitions.increment();
+        state.circuitTransitionMetric.increment();
     }
 
     public List<SourceHealth> snapshots() {
@@ -60,18 +101,35 @@ public final class SourceHealthRegistry {
             String sourceId,
             String sourceType,
             Instant lastMessageAt,
-            long messageCount,
+            long adapterReceivedCount,
+            long kafkaPublishedCount,
+            long kafkaConsumedCount,
+            long redeliveredCount,
+            long lateCount,
             long errorCount,
+            long circuitTransitionCount,
+            boolean degraded,
             double messageRatePerSecond) {}
 
     private static final class State {
         private final String sourceId;
         private final String sourceType;
         private final Instant startedAt;
-        private final LongAdder messages = new LongAdder();
+        private final LongAdder adapterReceived = new LongAdder();
+        private final LongAdder kafkaPublished = new LongAdder();
+        private final LongAdder kafkaConsumed = new LongAdder();
+        private final LongAdder redelivered = new LongAdder();
+        private final LongAdder late = new LongAdder();
         private final LongAdder errors = new LongAdder();
-        private final Counter ingest;
+        private final LongAdder circuitTransitions = new LongAdder();
+        private final Set<String> failedStages = ConcurrentHashMap.newKeySet();
+        private final Counter adapterReceivedMetric;
+        private final Counter kafkaPublishedMetric;
+        private final Counter kafkaConsumedMetric;
+        private final Counter redeliveredMetric;
+        private final Counter lateMetric;
         private final Counter failures;
+        private final Counter circuitTransitionMetric;
         private final Timer latency;
         private volatile Instant lastMessageAt;
 
@@ -83,20 +141,13 @@ public final class SourceHealthRegistry {
             this.sourceId = sourceId;
             this.sourceType = sourceType;
             this.startedAt = startedAt;
-            ingest =
-                    meters.counter(
-                            "track_fusion_source_ingest_total",
-                            "source_id",
-                            sourceId,
-                            "source_type",
-                            sourceType);
-            failures =
-                    meters.counter(
-                            "track_fusion_source_errors_total",
-                            "source_id",
-                            sourceId,
-                            "source_type",
-                            sourceType);
+            adapterReceivedMetric = counter(meters, "adapter_received");
+            kafkaPublishedMetric = counter(meters, "kafka_published");
+            kafkaConsumedMetric = counter(meters, "kafka_consumed");
+            redeliveredMetric = counter(meters, "redelivered");
+            lateMetric = counter(meters, "late");
+            failures = counter(meters, "errors");
+            circuitTransitionMetric = counter(meters, "circuit_transitions");
             latency =
                     Timer.builder("track_fusion_source_latency")
                             .tags("source_id", sourceId, "source_type", sourceType)
@@ -104,8 +155,19 @@ public final class SourceHealthRegistry {
                             .register(meters);
         }
 
+        private Counter counter(MeterRegistry meters, String stage) {
+            return meters.counter(
+                    "track_fusion_source_events_total",
+                    "source_id",
+                    sourceId,
+                    "source_type",
+                    sourceType,
+                    "stage",
+                    stage);
+        }
+
         private SourceHealth snapshot(Instant now) {
-            long count = messages.sum();
+            long count = kafkaConsumed.sum();
             double seconds =
                     Math.max(
                             1,
@@ -115,8 +177,14 @@ public final class SourceHealthRegistry {
                     sourceId,
                     sourceType,
                     lastMessageAt,
+                    adapterReceived.sum(),
+                    kafkaPublished.sum(),
                     count,
+                    redelivered.sum(),
+                    late.sum(),
                     errors.sum(),
+                    circuitTransitions.sum(),
+                    !failedStages.isEmpty(),
                     count / seconds);
         }
     }

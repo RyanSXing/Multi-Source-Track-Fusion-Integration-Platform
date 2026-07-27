@@ -35,8 +35,9 @@ public final class FusionEngine {
 
     private final LocalTangentPlane plane;
     private final FusionConfig config;
+    private long initialTrackId;
     private final Map<Long, MutableTrack> activeTracks = new LinkedHashMap<>();
-    private long nextTrackId = 1;
+    private long nextTrackId;
     private Instant lastTick;
 
     public FusionEngine(LocalTangentPlane plane) {
@@ -44,12 +45,33 @@ public final class FusionEngine {
     }
 
     public FusionEngine(LocalTangentPlane plane, FusionConfig config) {
+        this(plane, config, 1);
+    }
+
+    public FusionEngine(
+            LocalTangentPlane plane, FusionConfig config, long initialTrackId) {
         this.plane = Objects.requireNonNull(plane, "plane");
         this.config = Objects.requireNonNull(config, "config");
+        if (initialTrackId < 1) {
+            throw new IllegalArgumentException("initialTrackId must be positive");
+        }
+        this.initialTrackId = initialTrackId;
+        nextTrackId = initialTrackId;
     }
 
     public synchronized List<TrackSnapshot> update(Instant at, List<Detection> detections) {
         return update(at, detections, true);
+    }
+
+    public synchronized void initializeNextTrackId(long nextId) {
+        if (nextId < 1) {
+            throw new IllegalArgumentException("nextId must be positive");
+        }
+        if (lastTick != null || !activeTracks.isEmpty()) {
+            throw new IllegalStateException("fusion engine is already active");
+        }
+        initialTrackId = nextId;
+        nextTrackId = nextId;
     }
 
     public synchronized List<TrackSnapshot> updateAt(
@@ -80,9 +102,8 @@ public final class FusionEngine {
         lastTick = at;
 
         List<Measurement> measurements =
-                detections.stream()
+                coalesce(detections).stream()
                         .map(detection -> new Measurement(detection, toEnu(detection)))
-                        .sorted(Comparator.comparing(Measurement::detection, DETECTION_ORDER))
                         .toList();
         List<MutableTrack> existing = new ArrayList<>(activeTracks.values());
         existing.forEach(track -> track.predict(at));
@@ -157,7 +178,7 @@ public final class FusionEngine {
     public synchronized List<TrackSnapshot> replay(List<Detection> detections) {
         Objects.requireNonNull(detections, "detections");
         activeTracks.clear();
-        nextTrackId = 1;
+        nextTrackId = initialTrackId;
         lastTick = null;
 
         List<Detection> ordered = detections.stream().sorted(DETECTION_ORDER).toList();
@@ -182,6 +203,35 @@ public final class FusionEngine {
                 detection.latDeg(),
                 detection.lonDeg(),
                 detection.altMeters() == null ? 0 : detection.altMeters());
+    }
+
+    private static List<Detection> coalesce(List<Detection> detections) {
+        Map<ObservationKey, Detection> latest = new LinkedHashMap<>();
+        List<Detection> selected = new ArrayList<>();
+        detections.stream().sorted(DETECTION_ORDER).forEach(
+                detection -> {
+                    String identity = identity(detection);
+                    if (identity == null) {
+                        selected.add(detection);
+                    } else {
+                        latest.put(
+                                new ObservationKey(SourceKey.from(detection), identity),
+                                detection);
+                    }
+                });
+        selected.addAll(latest.values());
+        selected.sort(DETECTION_ORDER);
+        return List.copyOf(selected);
+    }
+
+    private static String identity(Detection detection) {
+        for (String key : List.of("groundTruth", "groundTruthId", "icao24", "mmsi")) {
+            String value = detection.attributes().get(key);
+            if (value != null && !value.isBlank()) {
+                return key + '=' + value;
+            }
+        }
+        return null;
     }
 
     private static List<TrackSnapshot> snapshots(
@@ -220,6 +270,8 @@ public final class FusionEngine {
             return new SourceKey(detection.sourceType(), detection.sourceId());
         }
     }
+
+    private record ObservationKey(SourceKey source, String identity) {}
 
     private final class MutableTrack {
         private final long id;

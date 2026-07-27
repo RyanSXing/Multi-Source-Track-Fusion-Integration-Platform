@@ -1,6 +1,7 @@
 package com.ryanxing.trackfusion.service;
 
 import java.util.List;
+import java.util.Map;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -21,6 +22,11 @@ public final class TrackController {
     @GetMapping("/tracks")
     public List<TrackView> tracks() {
         return tracks.currentTracks();
+    }
+
+    @GetMapping("/session")
+    public Map<String, String> session() {
+        return Map.of("sessionId", tracks.sessionId());
     }
 
     @GetMapping("/tracks/{trackId}/history")

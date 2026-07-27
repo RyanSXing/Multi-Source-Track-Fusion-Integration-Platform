@@ -53,6 +53,10 @@ track-fusion:
     latitude: ${FUSION_ORIGIN_LATITUDE:43.65}
     longitude: ${FUSION_ORIGIN_LONGITUDE:-79.38}
     altitude-meters: ${FUSION_ORIGIN_ALTITUDE_METERS:0}
+  fusion:
+    tick-interval: ${FUSION_TICK_INTERVAL:1s}
+    allowed-lateness: ${FUSION_ALLOWED_LATENESS:2s}
+    flush-interval: ${FUSION_FLUSH_INTERVAL:500ms}
   sources:
     fixture:
       enabled: ${FIXTURE_SOURCES_ENABLED:true}

@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ryanxing.trackfusion.common.LocalTangentPlane;
 import com.ryanxing.trackfusion.fusion.FusionConfig;
 import com.ryanxing.trackfusion.fusion.FusionEngine;
+import io.r2dbc.spi.ConnectionFactory;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.time.Clock;
 import java.util.Map;
@@ -13,11 +14,15 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.kafka.config.TopicBuilder;
+import org.springframework.scheduling.annotation.EnableScheduling;
+import org.springframework.transaction.ReactiveTransactionManager;
+import org.springframework.transaction.reactive.TransactionalOperator;
 import org.springframework.web.reactive.HandlerMapping;
 import org.springframework.web.reactive.handler.SimpleUrlHandlerMapping;
 import org.springframework.web.reactive.socket.server.support.WebSocketHandlerAdapter;
 
 @Configuration
+@EnableScheduling
 public class TrackFusionConfiguration {
 
     @Bean
@@ -34,23 +39,35 @@ public class TrackFusionConfiguration {
     }
 
     @Bean
-    FusionEngine fusionEngine(LocalTangentPlane plane) {
-        return new FusionEngine(plane, FusionConfig.defaults());
-    }
-
-    @Bean
     SourceHealthRegistry sourceHealthRegistry(Clock clock, MeterRegistry meters) {
         return new SourceHealthRegistry(clock, meters);
     }
 
     @Bean
     TrackService trackService(
-            FusionEngine engine,
             LocalTangentPlane plane,
             TrackHistoryRepository repository,
+            ProcessedKafkaRecordRepository processedRecords,
+            TransactionalOperator transactions,
             ObjectMapper json,
-            MeterRegistry meters) {
-        return new TrackService(engine, plane, repository, json, meters);
+            MeterRegistry meters,
+            ConnectionFactory connections) {
+        FusionEngine engine = new FusionEngine(plane, FusionConfig.defaults());
+        return new TrackService(
+                engine,
+                plane,
+                repository,
+                processedRecords,
+                transactions,
+                json,
+                meters,
+                connections);
+    }
+
+    @Bean
+    TransactionalOperator transactionalOperator(
+            ReactiveTransactionManager transactionManager) {
+        return TransactionalOperator.create(transactionManager);
     }
 
     @Bean

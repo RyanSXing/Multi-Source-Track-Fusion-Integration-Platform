@@ -6,6 +6,7 @@ import java.time.Instant;
 import java.util.List;
 
 public record TrackView(
+        String sessionId,
         long trackId,
         TrackStatus status,
         Instant stateAt,

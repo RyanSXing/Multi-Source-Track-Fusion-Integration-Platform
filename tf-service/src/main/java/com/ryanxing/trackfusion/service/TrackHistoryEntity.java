@@ -7,6 +7,7 @@ import org.springframework.data.relational.core.mapping.Table;
 @Table("track_history")
 public record TrackHistoryEntity(
         @Id Long id,
+        String sessionId,
         long trackId,
         String status,
         Instant stateAt,
