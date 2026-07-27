@@ -65,9 +65,13 @@ public final class OpenMeteoEnricher implements TrackEnricher {
     @Override
     public Mono<Detection> enrich(Detection detection) {
         Objects.requireNonNull(detection, "detection");
-        GridCell cell = GridCell.from(detection.latDeg(), detection.lonDeg(), gridDegrees);
-        return Mono.fromFuture(weather(cell))
-                .map(attributes -> withAttributes(detection, attributes));
+        return Mono.defer(
+                () -> {
+                    GridCell cell =
+                            GridCell.from(detection.latDeg(), detection.lonDeg(), gridDegrees);
+                    return Mono.fromFuture(weather(cell), true)
+                            .map(attributes -> withAttributes(detection, attributes));
+                });
     }
 
     private synchronized CompletableFuture<Map<String, String>> weather(GridCell cell) {

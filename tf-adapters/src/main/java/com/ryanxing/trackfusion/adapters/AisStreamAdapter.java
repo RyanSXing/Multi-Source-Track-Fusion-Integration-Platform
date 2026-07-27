@@ -9,7 +9,6 @@ import com.ryanxing.trackfusion.common.Detection;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.WebSocket;
-import java.time.Duration;
 import java.time.Instant;
 import java.time.format.DateTimeParseException;
 import java.util.LinkedHashMap;
@@ -20,10 +19,10 @@ import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Function;
 import java.util.function.Supplier;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.FluxSink;
-import reactor.util.retry.Retry;
 
 public final class AisStreamAdapter implements SourceAdapter {
     private static final ObjectMapper JSON = new ObjectMapper();
@@ -31,8 +30,6 @@ public final class AisStreamAdapter implements SourceAdapter {
 
     private final String sourceId;
     private final Supplier<Flux<String>> messages;
-    private final Duration minimumBackoff;
-    private final Duration maximumBackoff;
     private final double positionSigmaMeters;
 
     public AisStreamAdapter(
@@ -41,44 +38,25 @@ public final class AisStreamAdapter implements SourceAdapter {
             URI endpoint,
             String apiKey,
             List<BoundingBox> boundingBoxes,
-            Duration minimumBackoff,
-            Duration maximumBackoff,
             double positionSigmaMeters) {
         this(
                 sourceId,
-                () ->
-                        webSocketMessages(
-                                Objects.requireNonNull(client, "client"),
-                                Objects.requireNonNull(endpoint, "endpoint"),
-                                subscription(apiKey, boundingBoxes)),
-                minimumBackoff,
-                maximumBackoff,
+                liveMessages(client, endpoint, apiKey, boundingBoxes),
                 positionSigmaMeters);
     }
 
     AisStreamAdapter(
             String sourceId,
             Supplier<Flux<String>> messages,
-            Duration minimumBackoff,
-            Duration maximumBackoff,
             double positionSigmaMeters) {
         if (sourceId == null || sourceId.isBlank()) {
             throw new IllegalArgumentException("sourceId is required");
-        }
-        if (minimumBackoff == null
-                || minimumBackoff.isNegative()
-                || minimumBackoff.isZero()
-                || maximumBackoff == null
-                || maximumBackoff.compareTo(minimumBackoff) < 0) {
-            throw new IllegalArgumentException("invalid reconnect backoff");
         }
         if (!Double.isFinite(positionSigmaMeters) || positionSigmaMeters <= 0) {
             throw new IllegalArgumentException("positionSigmaMeters must be positive");
         }
         this.sourceId = sourceId;
         this.messages = Objects.requireNonNull(messages, "messages");
-        this.minimumBackoff = minimumBackoff;
-        this.maximumBackoff = maximumBackoff;
         this.positionSigmaMeters = positionSigmaMeters;
     }
 
@@ -97,11 +75,18 @@ public final class AisStreamAdapter implements SourceAdapter {
         return Flux.defer(messages)
                 .map(json -> parse(sourceId, json, Instant.now(), positionSigmaMeters))
                 .filter(Optional::isPresent)
-                .map(Optional::orElseThrow)
-                .retryWhen(
-                        Retry.backoff(Long.MAX_VALUE, minimumBackoff)
-                                .maxBackoff(maximumBackoff)
-                                .transientErrors(true));
+                .map(Optional::orElseThrow);
+    }
+
+    private static Supplier<Flux<String>> liveMessages(
+            HttpClient client,
+            URI endpoint,
+            String apiKey,
+            List<BoundingBox> boundingBoxes) {
+        HttpClient requiredClient = Objects.requireNonNull(client, "client");
+        URI requiredEndpoint = Objects.requireNonNull(endpoint, "endpoint");
+        String encodedSubscription = subscription(apiKey, boundingBoxes);
+        return () -> webSocketMessages(requiredClient, requiredEndpoint, encodedSubscription);
     }
 
     static Optional<Detection> parse(
@@ -116,7 +101,12 @@ public final class AisStreamAdapter implements SourceAdapter {
             JsonNode position = root.path("Message").path("PositionReport");
             Double latitude = number(position, "Latitude", metadata, "Latitude");
             Double longitude = number(position, "Longitude", metadata, "Longitude");
-            if (latitude == null || longitude == null) {
+            if (latitude == null
+                    || latitude < -90
+                    || latitude > 90
+                    || longitude == null
+                    || longitude < -180
+                    || longitude > 180) {
                 return Optional.empty();
             }
 
@@ -157,6 +147,16 @@ public final class AisStreamAdapter implements SourceAdapter {
 
     private static Flux<String> webSocketMessages(
             HttpClient client, URI endpoint, String subscription) {
+        return webSocketMessages(
+                listener -> client.newWebSocketBuilder().buildAsync(endpoint, listener),
+                subscription);
+    }
+
+    static Flux<String> webSocketMessages(
+            Function<WebSocket.Listener, CompletableFuture<WebSocket>> connector,
+            String subscription) {
+        Objects.requireNonNull(connector, "connector");
+        Objects.requireNonNull(subscription, "subscription");
         return Flux.create(
                 sink -> {
                     AtomicReference<WebSocket> socket = new AtomicReference<>();
@@ -166,8 +166,25 @@ public final class AisStreamAdapter implements SourceAdapter {
                                 @Override
                                 public void onOpen(WebSocket webSocket) {
                                     socket.set(webSocket);
-                                    webSocket.sendText(subscription, true);
-                                    webSocket.request(1);
+                                    if (sink.isCancelled()) {
+                                        webSocket.abort();
+                                        return;
+                                    }
+                                    try {
+                                        webSocket
+                                                .sendText(subscription, true)
+                                                .whenComplete(
+                                                        (ignored, error) -> {
+                                                            if (error != null
+                                                                    && !sink.isCancelled()) {
+                                                                sink.error(error);
+                                                            } else if (!sink.isCancelled()) {
+                                                                webSocket.request(1);
+                                                            }
+                                                        });
+                                    } catch (RuntimeException sendFailure) {
+                                        sink.error(sendFailure);
+                                    }
                                 }
 
                                 @Override
@@ -180,7 +197,9 @@ public final class AisStreamAdapter implements SourceAdapter {
                                         sink.next(message.toString());
                                         message.setLength(0);
                                     }
-                                    webSocket.request(1);
+                                    if (!sink.isCancelled()) {
+                                        webSocket.request(1);
+                                    }
                                     return CompletableFuture.completedFuture(null);
                                 }
 
@@ -204,16 +223,19 @@ public final class AisStreamAdapter implements SourceAdapter {
                                     }
                                 }
                             };
-                    client.newWebSocketBuilder()
-                            .buildAsync(endpoint, listener)
+                    CompletableFuture<WebSocket> connecting = connector.apply(listener);
+                    connecting
                             .whenComplete(
                                     (webSocket, error) -> {
                                         if (error != null && !sink.isCancelled()) {
                                             sink.error(error);
+                                        } else if (webSocket != null && sink.isCancelled()) {
+                                            webSocket.abort();
                                         }
                                     });
                     sink.onDispose(
                             () -> {
+                                connecting.cancel(true);
                                 WebSocket webSocket = socket.get();
                                 if (webSocket != null) {
                                     webSocket.abort();

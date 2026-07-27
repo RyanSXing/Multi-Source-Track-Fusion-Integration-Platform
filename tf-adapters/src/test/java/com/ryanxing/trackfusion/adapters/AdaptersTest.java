@@ -13,6 +13,8 @@ import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetAddress;
 import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.WebSocket;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -24,6 +26,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 import org.junit.jupiter.api.Test;
 import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
 import reactor.test.StepVerifier;
 
 class AdaptersTest {
@@ -74,6 +77,8 @@ class AdaptersTest {
                 {"states":[
                   ["c0ffee","AC 123 ","Canada",1767323040,1767323041,-79.38,43.65,
                    1200.0,false,90.5,181.0,0.0,null,1250.0,null,false,0],
+                  ["invalid","BAD","Canada",1767323040,1767323041,181.0,91.0,
+                   1200.0,false,90.5,181.0,0.0,null,1250.0,null,false,0],
                   ["bad",null,null,null,null,null,null,null,false,null,null,null,null,null,null,false,0]
                 ]}
                 """;
@@ -97,6 +102,46 @@ class AdaptersTest {
     }
 
     @Test
+    void skipsAisSentinelCoordinatesWithoutTerminatingTheFeed() {
+        String invalid =
+                """
+                {
+                  "MessageType":"PositionReport",
+                  "MetaData":{"MMSI":316001234},
+                  "Message":{"PositionReport":{"Latitude":91,"Longitude":181}}
+                }
+                """;
+
+        assertThat(AisStreamAdapter.parse("aisstream", invalid, NOW, 25)).isEmpty();
+    }
+
+    @Test
+    void cancellingAisWhileConnectingCancelsTheWebSocketHandshake() {
+        CompletableFuture<WebSocket> connection = new CompletableFuture<>();
+
+        reactor.core.Disposable subscription =
+                AisStreamAdapter.webSocketMessages(ignored -> connection, "{}").subscribe();
+        subscription.dispose();
+
+        assertThat(connection).isCancelled();
+    }
+
+    @Test
+    void validatesLiveAisConfigurationBeforeSubscription() {
+        assertThatIllegalArgumentException()
+                .isThrownBy(
+                        () ->
+                                new AisStreamAdapter(
+                                        "aisstream",
+                                        HttpClient.newHttpClient(),
+                                        URI.create("wss://stream.aisstream.io/v0/stream"),
+                                        " ",
+                                        List.of(),
+                                        25))
+                .withMessage("AISStream API key is required");
+    }
+
+    @Test
     void reconnectsAisAndParsesPositionReports() {
         String json =
                 """
@@ -116,16 +161,20 @@ class AdaptersTest {
                 }
                 """;
         AtomicInteger attempts = new AtomicInteger();
-        AisStreamAdapter adapter =
-                new AisStreamAdapter(
-                        "aisstream",
-                        () ->
-                                attempts.getAndIncrement() == 0
-                                        ? Flux.error(new IllegalStateException("disconnect"))
-                                        : Flux.just(json),
+        CircuitBreaker breaker = CircuitBreaker.ofDefaults("aisstream");
+        SourceAdapter adapter =
+                new ResilientSourceAdapter(
+                        new AisStreamAdapter(
+                                "aisstream",
+                                () ->
+                                        attempts.getAndIncrement() == 0
+                                                ? Flux.error(
+                                                        new IllegalStateException("disconnect"))
+                                                : Flux.just(json),
+                                25),
+                        breaker,
                         Duration.ofMillis(1),
-                        Duration.ofMillis(2),
-                        25);
+                        Duration.ofMillis(2));
 
         StepVerifier.create(adapter.stream())
                 .assertNext(
@@ -138,6 +187,46 @@ class AdaptersTest {
                         })
                 .verifyComplete();
         assertThat(attempts).hasValue(2);
+        assertThat(breaker.getMetrics())
+                .satisfies(
+                        metrics -> {
+                            assertThat(metrics.getNumberOfFailedCalls()).isEqualTo(1);
+                            assertThat(metrics.getNumberOfSuccessfulCalls()).isEqualTo(1);
+                        });
+    }
+
+    @Test
+    void schedulesTheNextOpenSkyPollAfterThePreviousPollCompletes() {
+        AtomicInteger polls = new AtomicInteger();
+        String response =
+                """
+                {"states":[
+                  ["c0ffee","AC 123","Canada",1767323040,1767323041,-79.38,43.65,
+                   1200.0,false,90.5,181.0,0.0,null,1250.0,null,false,0]
+                ]}
+                """;
+        SourceAdapter adapter =
+                new ResilientSourceAdapter(
+                        new OpenSkyAdapter(
+                                "opensky",
+                                () -> {
+                                    polls.incrementAndGet();
+                                    return Mono.just(response);
+                                },
+                                12),
+                        CircuitBreaker.ofDefaults("opensky-poll"),
+                        Duration.ofMillis(100),
+                        Duration.ofSeconds(1),
+                        Duration.ofSeconds(1));
+
+        StepVerifier.withVirtualTime(() -> adapter.stream().take(2))
+                .expectSubscription()
+                .expectNextCount(1)
+                .expectNoEvent(Duration.ofMillis(999))
+                .thenAwait(Duration.ofMillis(1))
+                .expectNextCount(1)
+                .verifyComplete();
+        assertThat(polls).hasValue(2);
     }
 
     @Test
@@ -185,6 +274,35 @@ class AdaptersTest {
                 .containsEntry("weather.temperatureC", "21.5")
                 .containsEntry("weather.windSpeedMps", "5.0");
         assertThat(second.attributes()).containsEntry("weather.code", "2");
+    }
+
+    @Test
+    void cancellingOneWeatherSubscriberDoesNotCancelTheSharedRequest() {
+        CompletableFuture<String> response = new CompletableFuture<>();
+        AtomicInteger calls = new AtomicInteger();
+        OpenMeteoEnricher enricher =
+                new OpenMeteoEnricher(
+                        ignored -> {
+                            calls.incrementAndGet();
+                            return response;
+                        },
+                        Clock.fixed(NOW, ZoneOffset.UTC),
+                        Duration.ofMinutes(10),
+                        0.1);
+        Mono<Detection> enrichment = enricher.enrich(detection("fixture", "ADSB"));
+
+        reactor.core.Disposable first = enrichment.subscribe();
+        CompletableFuture<Detection> second = enrichment.toFuture();
+        first.dispose();
+
+        assertThat(response).isNotCancelled();
+        response.complete(
+                """
+                {"current":{"temperature_2m":21.5,"weather_code":2}}
+                """);
+        assertThat(second.join().attributes())
+                .containsEntry("weather.temperatureC", "21.5");
+        assertThat(calls).hasValue(1);
     }
 
     @Test
@@ -356,6 +474,20 @@ class AdaptersTest {
                             assertThat(detection.attributes())
                                     .containsEntry("icao24", "c0ffee");
                         });
+        assertThatIllegalArgumentException()
+                .isThrownBy(
+                        () ->
+                                RadarSimulatorMain.parse(
+                                        List.of(
+                                                "wrong,header",
+                                                "2026-01-02T03:04:05Z,43.65,-79.38,1200,90,180,c0ffee")));
+        assertThatIllegalArgumentException()
+                .isThrownBy(
+                        () ->
+                                RadarSimulatorMain.parse(
+                                        List.of(
+                                                "observedAt,latDeg,lonDeg,altMeters,speedMps,headingDeg,icao24",
+                                                "2026-01-02T03:04:05Z,43.65,-79.38,1200,90,180, ")));
     }
 
     private static Detection detection(String sourceId, String sourceType) {

@@ -8,49 +8,48 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
-import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.function.Supplier;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
-import reactor.util.retry.Retry;
 
 public final class OpenSkyAdapter implements SourceAdapter {
     private static final ObjectMapper JSON = new ObjectMapper();
 
     private final String sourceId;
-    private final HttpClient client;
-    private final URI endpoint;
-    private final Duration pollInterval;
+    private final Supplier<Mono<String>> poller;
     private final double positionSigmaMeters;
-    private final String bearerToken;
 
     public OpenSkyAdapter(
             String sourceId,
             HttpClient client,
             URI endpoint,
-            Duration pollInterval,
             double positionSigmaMeters,
             String bearerToken) {
+        this(
+                sourceId,
+                livePoller(client, endpoint, bearerToken),
+                positionSigmaMeters);
+    }
+
+    OpenSkyAdapter(
+            String sourceId,
+            Supplier<Mono<String>> poller,
+            double positionSigmaMeters) {
         if (sourceId == null || sourceId.isBlank()) {
             throw new IllegalArgumentException("sourceId is required");
-        }
-        if (pollInterval == null || pollInterval.isNegative() || pollInterval.isZero()) {
-            throw new IllegalArgumentException("pollInterval must be positive");
         }
         if (!Double.isFinite(positionSigmaMeters) || positionSigmaMeters <= 0) {
             throw new IllegalArgumentException("positionSigmaMeters must be positive");
         }
         this.sourceId = sourceId;
-        this.client = Objects.requireNonNull(client, "client");
-        this.endpoint = Objects.requireNonNull(endpoint, "endpoint");
-        this.pollInterval = pollInterval;
+        this.poller = Objects.requireNonNull(poller, "poller");
         this.positionSigmaMeters = positionSigmaMeters;
-        this.bearerToken = bearerToken;
     }
 
     @Override
@@ -65,17 +64,27 @@ public final class OpenSkyAdapter implements SourceAdapter {
 
     @Override
     public Flux<Detection> stream() {
-        return Flux.interval(Duration.ZERO, pollInterval)
-                .concatMap(ignored -> fetch())
-                .flatMapIterable(
-                        json -> parse(sourceId, json, Instant.now(), positionSigmaMeters))
-                .retryWhen(
-                        Retry.backoff(Long.MAX_VALUE, pollInterval)
-                                .maxBackoff(Duration.ofMinutes(5))
-                                .transientErrors(true));
+        return Flux.defer(
+                () ->
+                        poller.get()
+                                .flatMapIterable(
+                                        json ->
+                                                parse(
+                                                        sourceId,
+                                                        json,
+                                                        Instant.now(),
+                                                        positionSigmaMeters)));
     }
 
-    private Mono<String> fetch() {
+    private static Supplier<Mono<String>> livePoller(
+            HttpClient client, URI endpoint, String bearerToken) {
+        HttpClient requiredClient = Objects.requireNonNull(client, "client");
+        URI requiredEndpoint = Objects.requireNonNull(endpoint, "endpoint");
+        return () -> fetch(requiredClient, requiredEndpoint, bearerToken);
+    }
+
+    private static Mono<String> fetch(
+            HttpClient client, URI endpoint, String bearerToken) {
         HttpRequest.Builder request = HttpRequest.newBuilder(endpoint).GET();
         if (bearerToken != null && !bearerToken.isBlank()) {
             request.header("Authorization", "Bearer " + bearerToken);
@@ -107,6 +116,16 @@ public final class OpenSkyAdapter implements SourceAdapter {
                         || !state.get(6).isNumber()) {
                     continue;
                 }
+                Double longitude = number(state.get(5));
+                Double latitude = number(state.get(6));
+                if (latitude == null
+                        || latitude < -90
+                        || latitude > 90
+                        || longitude == null
+                        || longitude < -180
+                        || longitude > 180) {
+                    continue;
+                }
                 Map<String, String> attributes = new LinkedHashMap<>();
                 putText(attributes, "icao24", state.get(0));
                 putText(attributes, "callsign", state.get(1));
@@ -123,8 +142,8 @@ public final class OpenSkyAdapter implements SourceAdapter {
                                 "ADSB",
                                 observedAt,
                                 receivedAt,
-                                state.get(6).doubleValue(),
-                                state.get(5).doubleValue(),
+                                latitude,
+                                longitude,
                                 altitude,
                                 nonNegative(number(state.get(9))),
                                 heading(number(state.get(10))),

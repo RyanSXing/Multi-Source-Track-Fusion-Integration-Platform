@@ -11,6 +11,9 @@ import java.util.List;
 import java.util.Map;
 
 public final class RadarSimulatorMain {
+    private static final String CSV_HEADER =
+            "observedAt,latDeg,lonDeg,altMeters,speedMps,headingDeg,icao24";
+
     private RadarSimulatorMain() {}
 
     public static void main(String[] args) throws Exception {
@@ -40,6 +43,9 @@ public final class RadarSimulatorMain {
         if (lines == null || lines.size() < 2) {
             throw new IllegalArgumentException("radar replay CSV has no data");
         }
+        if (!CSV_HEADER.equals(lines.getFirst().trim())) {
+            throw new IllegalArgumentException("invalid radar replay CSV header");
+        }
         List<Detection> detections = new ArrayList<>();
         for (int lineNumber = 1; lineNumber < lines.size(); lineNumber++) {
             String line = lines.get(lineNumber);
@@ -50,6 +56,11 @@ public final class RadarSimulatorMain {
             if (values.length != 7) {
                 throw new IllegalArgumentException(
                         "invalid radar replay CSV line " + (lineNumber + 1));
+            }
+            String icao24 = values[6].trim();
+            if (icao24.isEmpty()) {
+                throw new IllegalArgumentException(
+                        "missing icao24 on radar replay CSV line " + (lineNumber + 1));
             }
             Instant observedAt = Instant.parse(values[0].trim());
             detections.add(
@@ -64,7 +75,7 @@ public final class RadarSimulatorMain {
                             Double.parseDouble(values[4].trim()),
                             Double.parseDouble(values[5].trim()),
                             10,
-                            Map.of("icao24", values[6].trim())));
+                            Map.of("icao24", icao24)));
         }
         return List.copyOf(detections);
     }
