@@ -18,12 +18,20 @@ import java.util.Objects;
 import java.util.Set;
 
 public final class FusionEngine {
+    private static final Comparator<Double> NULLABLE_DOUBLE =
+            Comparator.nullsFirst(Double::compareTo);
     private static final Comparator<Detection> DETECTION_ORDER =
             Comparator.comparing(Detection::observedAt)
                     .thenComparing(Detection::sourceType)
                     .thenComparing(Detection::sourceId)
                     .thenComparingDouble(Detection::latDeg)
-                    .thenComparingDouble(Detection::lonDeg);
+                    .thenComparingDouble(Detection::lonDeg)
+                    .thenComparing(Detection::altMeters, NULLABLE_DOUBLE)
+                    .thenComparing(Detection::speedMps, NULLABLE_DOUBLE)
+                    .thenComparing(Detection::headingDeg, NULLABLE_DOUBLE)
+                    .thenComparingDouble(Detection::positionSigmaMeters)
+                    .thenComparing(Detection::receivedAt)
+                    .thenComparing(Detection::attributes, FusionEngine::compareAttributes);
 
     private final LocalTangentPlane plane;
     private final FusionConfig config;
@@ -43,8 +51,15 @@ public final class FusionEngine {
     public synchronized List<TrackSnapshot> update(Instant at, List<Detection> detections) {
         Objects.requireNonNull(at, "at");
         Objects.requireNonNull(detections, "detections");
-        if (lastTick != null && at.isBefore(lastTick)) {
-            throw new IllegalArgumentException("fusion updates must be chronological");
+        if (lastTick != null && !at.isAfter(lastTick)) {
+            throw new IllegalArgumentException("fusion ticks must be strictly increasing");
+        }
+        if (detections.stream()
+                .anyMatch(
+                        detection ->
+                                detection == null
+                                        || !detection.observedAt().equals(at))) {
+            throw new IllegalArgumentException("all detections must match the fusion tick");
         }
         lastTick = at;
 
@@ -56,66 +71,67 @@ public final class FusionEngine {
         List<MutableTrack> existing = new ArrayList<>(activeTracks.values());
         existing.forEach(track -> track.predict(at));
 
-        double[][] costs = new double[existing.size()][measurements.size()];
-        for (int track = 0; track < existing.size(); track++) {
-            for (int measurement = 0; measurement < measurements.size(); measurement++) {
-                Measurement candidate = measurements.get(measurement);
-                costs[track][measurement] =
-                        existing.get(track)
-                                .filter
-                                .mahalanobisSquared(
-                                        candidate.position.eastMeters(),
-                                        candidate.position.northMeters(),
-                                        candidate.detection.positionSigmaMeters());
-            }
+        Map<SourceKey, List<Measurement>> measurementsBySource = new LinkedHashMap<>();
+        for (Measurement measurement : measurements) {
+            measurementsBySource
+                    .computeIfAbsent(
+                            SourceKey.from(measurement.detection),
+                            ignored -> new ArrayList<>())
+                    .add(measurement);
         }
 
-        int[] assignment =
-                HungarianAssignment.solve(costs, config.associationGateSquared());
-        boolean[] usedMeasurements = new boolean[measurements.size()];
+        List<MutableTrack> candidates = new ArrayList<>(existing);
         Set<Long> tracksHit = new HashSet<>();
-        Map<Long, Set<String>> sourcesUsedThisTick = new HashMap<>();
-        for (int track = 0; track < assignment.length; track++) {
-            int measurement = assignment[track];
-            if (measurement >= 0) {
-                MutableTrack target = existing.get(track);
-                Measurement match = measurements.get(measurement);
-                target.hit(match);
-                tracksHit.add(target.id);
-                sourcesUsedThisTick
-                        .computeIfAbsent(target.id, ignored -> new HashSet<>())
-                        .add(match.detection.sourceType());
-                usedMeasurements[measurement] = true;
+        for (List<Measurement> sourceMeasurements : measurementsBySource.values()) {
+            double[][] costs = new double[candidates.size()][sourceMeasurements.size()];
+            for (int track = 0; track < candidates.size(); track++) {
+                for (int measurement = 0;
+                        measurement < sourceMeasurements.size();
+                        measurement++) {
+                    Measurement candidate = sourceMeasurements.get(measurement);
+                    costs[track][measurement] =
+                            candidates.get(track)
+                                    .filter
+                                    .mahalanobisSquared(
+                                            candidate.position.eastMeters(),
+                                            candidate.position.northMeters(),
+                                            candidate.detection.positionSigmaMeters());
+                }
             }
-        }
 
-        List<MutableTrack> births = new ArrayList<>();
-        for (int index = 0; index < measurements.size(); index++) {
-            if (usedMeasurements[index]) {
-                continue;
+            int[] assignment =
+                    HungarianAssignment.solve(costs, config.associationGateSquared());
+            boolean[] usedMeasurements = new boolean[sourceMeasurements.size()];
+            for (int track = 0; track < assignment.length; track++) {
+                int measurement = assignment[track];
+                if (measurement >= 0) {
+                    MutableTrack target = candidates.get(track);
+                    target.assimilate(sourceMeasurements.get(measurement));
+                    tracksHit.add(target.id);
+                    usedMeasurements[measurement] = true;
+                }
             }
-            Measurement measurement = measurements.get(index);
-            MutableTrack target =
-                    nearestAvailableTrack(
-                            measurement, existing, births, sourcesUsedThisTick);
-            if (target == null) {
-                target = new MutableTrack(nextTrackId++, at, measurement);
-                births.add(target);
-            } else {
-                target.hit(measurement);
+            for (int measurement = 0;
+                    measurement < sourceMeasurements.size();
+                    measurement++) {
+                if (!usedMeasurements[measurement]) {
+                    MutableTrack birth =
+                            new MutableTrack(
+                                    nextTrackId++, at, sourceMeasurements.get(measurement));
+                    activeTracks.put(birth.id, birth);
+                    candidates.add(birth);
+                    tracksHit.add(birth.id);
+                }
             }
-            tracksHit.add(target.id);
-            sourcesUsedThisTick
-                    .computeIfAbsent(target.id, ignored -> new HashSet<>())
-                    .add(measurement.detection.sourceType());
         }
 
         for (MutableTrack track : existing) {
-            if (!tracksHit.contains(track.id)) {
+            if (tracksHit.contains(track.id)) {
+                track.hitTick();
+            } else {
                 track.miss();
             }
         }
-        births.forEach(track -> activeTracks.put(track.id, track));
 
         List<TrackSnapshot> snapshots = snapshots(activeTracks.values());
         activeTracks.values().removeIf(track -> track.status == TrackStatus.DROPPED);
@@ -152,33 +168,6 @@ public final class FusionEngine {
                 detection.altMeters() == null ? 0 : detection.altMeters());
     }
 
-    private MutableTrack nearestAvailableTrack(
-            Measurement measurement,
-            List<MutableTrack> existing,
-            List<MutableTrack> births,
-            Map<Long, Set<String>> sourcesUsedThisTick) {
-        MutableTrack closest = null;
-        double closestCost = config.associationGateSquared();
-        for (MutableTrack track :
-                java.util.stream.Stream.concat(existing.stream(), births.stream()).toList()) {
-            if (sourcesUsedThisTick
-                    .getOrDefault(track.id, Set.of())
-                    .contains(measurement.detection.sourceType())) {
-                continue;
-            }
-            double cost =
-                    track.filter.mahalanobisSquared(
-                            measurement.position.eastMeters(),
-                            measurement.position.northMeters(),
-                            measurement.detection.positionSigmaMeters());
-            if (cost <= closestCost) {
-                closest = track;
-                closestCost = cost;
-            }
-        }
-        return closest;
-    }
-
     private static List<TrackSnapshot> snapshots(
             java.util.Collection<MutableTrack> tracks) {
         return tracks.stream()
@@ -187,7 +176,34 @@ public final class FusionEngine {
                 .toList();
     }
 
+    private static int compareAttributes(
+            Map<String, String> left, Map<String, String> right) {
+        List<Map.Entry<String, String>> leftEntries =
+                left.entrySet().stream().sorted(Map.Entry.comparingByKey()).toList();
+        List<Map.Entry<String, String>> rightEntries =
+                right.entrySet().stream().sorted(Map.Entry.comparingByKey()).toList();
+        for (int index = 0; index < Math.min(leftEntries.size(), rightEntries.size()); index++) {
+            int key =
+                    leftEntries.get(index).getKey().compareTo(rightEntries.get(index).getKey());
+            if (key != 0) {
+                return key;
+            }
+            int value =
+                    leftEntries.get(index).getValue().compareTo(rightEntries.get(index).getValue());
+            if (value != 0) {
+                return value;
+            }
+        }
+        return Integer.compare(leftEntries.size(), rightEntries.size());
+    }
+
     private record Measurement(Detection detection, EnuPoint position) {}
+
+    private record SourceKey(String sourceType, String sourceId) {
+        private static SourceKey from(Detection detection) {
+            return new SourceKey(detection.sourceType(), detection.sourceId());
+        }
+    }
 
     private final class MutableTrack {
         private final long id;
@@ -204,13 +220,12 @@ public final class FusionEngine {
             this.id = id;
             this.stateAt = at;
             this.lastObservedAt = first.detection.observedAt();
-            double speed =
-                    first.detection.speedMps() == null ? 0 : first.detection.speedMps();
+            boolean hasVelocity =
+                    first.detection.speedMps() != null
+                            && first.detection.headingDeg() != null;
+            double speed = hasVelocity ? first.detection.speedMps() : 0;
             double heading =
-                    Math.toRadians(
-                            first.detection.headingDeg() == null
-                                    ? 0
-                                    : first.detection.headingDeg());
+                    hasVelocity ? Math.toRadians(first.detection.headingDeg()) : 0;
             filter =
                     new KalmanFilter2D(
                             first.position.eastMeters(),
@@ -232,7 +247,7 @@ public final class FusionEngine {
             stateAt = at;
         }
 
-        private void hit(Measurement measurement) {
+        private void assimilate(Measurement measurement) {
             filter.update(
                     measurement.position.eastMeters(),
                     measurement.position.northMeters(),
@@ -241,9 +256,12 @@ public final class FusionEngine {
                     lastObservedAt.isAfter(measurement.detection.observedAt())
                             ? lastObservedAt
                             : measurement.detection.observedAt();
+            remember(measurement.detection);
+        }
+
+        private void hitTick() {
             hitCount++;
             consecutiveMisses = 0;
-            remember(measurement.detection);
             recordConfirmation(true);
             if (status == TrackStatus.COASTING
                     || status == TrackStatus.TENTATIVE

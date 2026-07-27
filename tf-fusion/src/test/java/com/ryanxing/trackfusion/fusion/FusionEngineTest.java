@@ -1,6 +1,7 @@
 package com.ryanxing.trackfusion.fusion;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
 
 import com.ryanxing.trackfusion.common.Detection;
 import com.ryanxing.trackfusion.common.EnuPoint;
@@ -39,6 +40,23 @@ class FusionEngineTest {
                         200);
 
         assertThat(assignment).containsExactly(1, 0);
+    }
+
+    @Test
+    void gatesAndLeavesRectangularAssignmentsUnmatched() {
+        assertThat(
+                        HungarianAssignment.solve(
+                                new double[][] {
+                                    {1, Double.POSITIVE_INFINITY},
+                                    {2, 1},
+                                    {100, 2}
+                                },
+                                10))
+                .containsExactly(0, 1, -1);
+        assertThat(HungarianAssignment.solve(new double[][] {{9.21}}, 9.21))
+                .containsExactly(0);
+        assertThat(HungarianAssignment.solve(new double[][] {{9.2101}}, 9.21))
+                .containsExactly(-1);
     }
 
     @Test
@@ -116,8 +134,169 @@ class FusionEngineTest {
                         });
     }
 
+    @Test
+    void assignsEachSourceGloballyButCountsOneLifecycleHitPerTick() {
+        FusionEngine engine =
+                new FusionEngine(PLANE, new FusionConfig(2, 3, 3, 9.21, 1));
+
+        List<TrackSnapshot> newborn =
+                engine.update(
+                        START,
+                        List.of(
+                                detection("adsb-feed", "ADSB", START, 0),
+                                detection("radar-a", "RADAR", START, 0)));
+
+        assertThat(newborn)
+                .singleElement()
+                .satisfies(
+                        track -> {
+                            assertThat(track.status()).isEqualTo(TrackStatus.TENTATIVE);
+                            assertThat(track.hitCount()).isEqualTo(1);
+                            assertThat(track.contributors()).hasSize(2);
+                        });
+
+        FusionEngine twoTargets =
+                new FusionEngine(PLANE, new FusionConfig(2, 3, 3, 9.21, 1));
+        twoTargets.update(
+                START,
+                List.of(
+                        detection("adsb-feed", "ADSB", START, 0),
+                        detection("adsb-feed", "ADSB", START, 10)));
+        List<TrackSnapshot> updated =
+                twoTargets.update(
+                        START.plusSeconds(1),
+                        List.of(
+                                detection(
+                                        "radar-a", "RADAR", START.plusSeconds(1), 0),
+                                detection(
+                                        "radar-b", "RADAR", START.plusSeconds(1), 1)));
+
+        assertThat(updated).hasSize(2);
+        assertThat(updated.get(0).contributors()).hasSize(3);
+        assertThat(updated.get(0).status()).isEqualTo(TrackStatus.CONFIRMED);
+        assertThat(updated.get(1).contributors()).hasSize(1);
+    }
+
+    @Test
+    void replayOrdersComparatorTiesByEveryStateAffectingField() {
+        Detection precise =
+                detection(
+                        "adsb-feed",
+                        "ADSB",
+                        START,
+                        0,
+                        2.0,
+                        90.0,
+                        1,
+                        Map.of("target", "precise"));
+        Detection noisy =
+                detection(
+                        "adsb-feed",
+                        "ADSB",
+                        START,
+                        0,
+                        20.0,
+                        270.0,
+                        10,
+                        Map.of("target", "noisy"));
+
+        List<TrackSnapshot> first =
+                new FusionEngine(PLANE).replay(List.of(precise, noisy));
+        List<TrackSnapshot> second =
+                new FusionEngine(PLANE).replay(List.of(noisy, precise));
+
+        assertThat(second).isEqualTo(first);
+    }
+
+    @Test
+    void doesNotInventVelocityWhenHeadingIsMissing() {
+        FusionEngine engine = new FusionEngine(PLANE);
+
+        engine.update(
+                START,
+                List.of(
+                        detection(
+                                "adsb-feed",
+                                "ADSB",
+                                START,
+                                0,
+                                100.0,
+                                null,
+                                5,
+                                Map.of())));
+
+        assertThat(
+                        engine.update(
+                                START.plusSeconds(1),
+                                List.of(
+                                        detection(
+                                                "adsb-feed",
+                                                "ADSB",
+                                                START.plusSeconds(1),
+                                                0,
+                                                100.0,
+                                                null,
+                                                5,
+                                                Map.of()))))
+                .hasSize(1);
+    }
+
+    @Test
+    void rejectsRepeatedTicksAndMismatchedMeasurementTimes() {
+        FusionEngine engine = new FusionEngine(PLANE);
+        engine.update(START, List.of(detection("adsb-feed", "ADSB", START, 0)));
+
+        assertThatIllegalArgumentException()
+                .isThrownBy(() -> engine.update(START, List.of()));
+        assertThatIllegalArgumentException()
+                .isThrownBy(
+                        () ->
+                                engine.update(
+                                        START.plusSeconds(1),
+                                        List.of(
+                                                detection(
+                                                        "adsb-feed",
+                                                        "ADSB",
+                                                        START,
+                                                        0))));
+    }
+
+    @Test
+    void dropsTentativeTracksThatMissTheConfirmationWindow() {
+        FusionEngine engine =
+                new FusionEngine(PLANE, new FusionConfig(3, 3, 5, 9.21, 1));
+        engine.update(START, List.of(detection("adsb-feed", "ADSB", START, 0)));
+        engine.update(START.plusSeconds(1), List.of());
+
+        assertThat(engine.update(START.plusSeconds(2), List.of()))
+                .singleElement()
+                .extracting(TrackSnapshot::status)
+                .isEqualTo(TrackStatus.DROPPED);
+        assertThat(engine.tracks()).isEmpty();
+    }
+
     private static Detection detection(
             String sourceId, String sourceType, Instant observedAt, double eastMeters) {
+        return detection(
+                sourceId,
+                sourceType,
+                observedAt,
+                eastMeters,
+                1.0,
+                90.0,
+                5,
+                Map.of());
+    }
+
+    private static Detection detection(
+            String sourceId,
+            String sourceType,
+            Instant observedAt,
+            double eastMeters,
+            Double speedMps,
+            Double headingDeg,
+            double sigmaMeters,
+            Map<String, String> attributes) {
         GeodeticPoint point = PLANE.toGeodetic(new EnuPoint(eastMeters, 0, 0));
         return new Detection(
                 sourceId,
@@ -127,9 +306,9 @@ class FusionEngineTest {
                 point.latDeg(),
                 point.lonDeg(),
                 point.altMeters(),
-                1.0,
-                90.0,
-                5,
-                Map.of());
+                speedMps,
+                headingDeg,
+                sigmaMeters,
+                attributes);
     }
 }
